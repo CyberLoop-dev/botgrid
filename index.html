@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>botgrid: pathfinding playground</title>
+<style>
+:root{--bg:#f1f7f6;--card:#fff;--fg:#0b2a2a;--mut:#5b7a7a;--line:#d5e5e3;--acc:#0d9488;--cell:#f8fbfb;--wall:#134e4a;--seen:#99f6e4;--path:#fbbf24;--start:#22c55e;--goal:#ef4444}
+@media (prefers-color-scheme:dark){:root{--bg:#07181a;--card:#0d2427;--fg:#e2f4f2;--mut:#7fb0ac;--line:#1b4044;--acc:#2dd4bf;--cell:#0a1d20;--wall:#5eead4;--seen:#115e59;--path:#fbbf24;--start:#4ade80;--goal:#f87171}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 ui-sans-serif,system-ui,"Segoe UI",Helvetica,Arial,sans-serif}
+main{max-width:980px;margin:0 auto;padding:26px 16px 50px}
+h1{margin:0;font-size:30px;letter-spacing:-.5px}
+.sub{color:var(--mut);margin:4px 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px}
+.bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+select,button,label.chk{background:transparent;color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:8px 12px;font:600 14px inherit;cursor:pointer}
+button.go{background:var(--acc);color:#04201d;border-color:transparent}
+label.chk{display:flex;gap:6px;align-items:center}
+input[type=range]{accent-color:var(--acc)}
+canvas{width:100%;display:block;border-radius:10px;touch-action:none;cursor:crosshair}
+.stats{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;color:var(--mut);font-size:14px}
+.stats b{color:var(--fg)}
+.hint{color:var(--mut);font-size:13px;margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+  <h1>🤖 botgrid</h1>
+  <p class="sub">Draw walls, drag the green start and red goal, then watch a robot find its way.</p>
+  <div class="card">
+    <div class="bar">
+      <select id="algo" aria-label="Algorithm">
+        <option value="astar">A* (shortest, fast)</option>
+        <option value="dijkstra">Dijkstra (shortest)</option>
+        <option value="bfs">Breadth-first</option>
+        <option value="greedy">Greedy best-first</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="diag"> diagonals</label>
+      <label class="chk">speed <input type="range" id="speed" min="1" max="30" value="8"></label>
+      <button class="go" id="run">▶ Run</button>
+      <button id="maze">🎲 Random walls</button>
+      <button id="clear">🧽 Clear</button>
+    </div>
+    <canvas id="cv"></canvas>
+    <div class="stats">
+      <span>Explored: <b id="sSeen">0</b></span>
+      <span>Path length: <b id="sPath">-</b></span>
+      <span>Result: <b id="sRes">ready</b></span>
+    </div>
+    <div class="hint">Tip: greedy is quick but not always shortest. BFS and Dijkstra explore a lot. A* usually explores the least while staying optimal.</div>
+  </div>
+</main>
+<script>
+const COLS = 36, ROWS = 20, CS = 28;
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+cv.width = COLS * CS; cv.height = ROWS * CS;
+const $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+let walls = new Uint8Array(COLS * ROWS);
+let start = {x: 4, y: 10}, goal = {x: 31, y: 10};
+let anim = null; // {order, path, seen, pathN, t, done, robot}
+
+const idx = (x, y) => y * COLS + x;
+
+function solve(algo, diag){
+  const N = COLS * ROWS, s = idx(start.x, start.y), g = idx(goal.x, goal.y);
+  const dist = new Float64Array(N).fill(Infinity), prev = new Int32Array(N).fill(-1);
+  const closed = new Uint8Array(N), inOpen = new Uint8Array(N), key = new Float64Array(N);
+  const h = i => {
+    const dx = Math.abs(i % COLS - goal.x), dy = Math.abs(((i / COLS) | 0) - goal.y);
+    return diag ? Math.max(dx, dy) + 0.414 * Math.min(dx, dy) : dx + dy;
+  };
+  let seq = 0;
+  const keyOf = (i, d) => algo === "astar" ? d + h(i) : algo === "dijkstra" ? d : algo === "greedy" ? h(i) : seq++;
+  const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+  if (diag) dirs.push([1,1],[1,-1],[-1,1],[-1,-1]);
+  dist[s] = 0; key[s] = keyOf(s, 0);
+  const open = [s]; inOpen[s] = 1;
+  const order = [];
+  while (open.length) {
+    let bi = 0;
+    for (let k = 1; k < open.length; k++) if (key[open[k]] < key[open[bi]]) bi = k;
+    const cur = open[bi]; open[bi] = open[open.length - 1]; open.pop(); inOpen[cur] = 0;
+    if (closed[cur]) continue;
+    closed[cur] = 1; order.push(cur);
+    if (cur === g) break;
+    const cx = cur % COLS, cy = (cur / COLS) | 0;
+    for (const [dx, dy] of dirs) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+      const n = idx(nx, ny);
+      if (walls[n] || closed[n]) continue;
+      if (dx && dy && (walls[idx(cx + dx, cy)] || walls[idx(cx, cy + dy)])) continue; // no corner cutting
+      const step = algo === "bfs" ? 1 : (dx && dy ? Math.SQRT2 : 1);
+      const nd = dist[cur] + step;
+      const better = algo === "bfs" ? dist[n] === Infinity : nd < dist[n];
+      if (better) {
+        dist[n] = nd; prev[n] = cur; key[n] = keyOf(n, nd);
+        if (!inOpen[n]) { open.push(n); inOpen[n] = 1; }
+      }
+    }
+  }
+  const path = [];
+  if (closed[g]) for (let p = g; p !== -1; p = prev[p]) path.push(p);
+  path.reverse();
+  return {order, path, found: closed[g] === 1};
+}
+
+function reset(){ anim = null; $("sSeen").textContent = "0"; $("sPath").textContent = "-"; $("sRes").textContent = "ready"; }
+
+function run(){
+  const r = solve($("algo").value, $("diag").checked);
+  anim = {order: r.order, path: r.path, found: r.found, seen: 0, pathN: 0, robot: 0, phase: "seen"};
+  $("sRes").textContent = "searching...";
+}
+
+function step(){
+  if (!anim) return;
+  const sp = Number($("speed").value);
+  if (anim.phase === "seen") {
+    anim.seen = Math.min(anim.order.length, anim.seen + sp);
+    $("sSeen").textContent = anim.seen;
+    if (anim.seen >= anim.order.length) anim.phase = anim.found ? "path" : "done";
+    if (anim.phase === "done") $("sRes").textContent = "no route";
+  } else if (anim.phase === "path") {
+    anim.pathN = Math.min(anim.path.length, anim.pathN + Math.max(1, sp / 3));
+    if (anim.pathN >= anim.path.length) {
+      anim.phase = "drive"; anim.robot = 0;
+      let len = 0;
+      for (let i = 1; i < anim.path.length; i++) {
+        const a = anim.path[i - 1], b = anim.path[i];
+        len += (a % COLS !== b % COLS && ((a / COLS) | 0) !== ((b / COLS) | 0)) ? Math.SQRT2 : 1;
+      }
+      $("sPath").textContent = len.toFixed(len % 1 ? 2 : 0);
+      $("sRes").textContent = "route found";
+    }
+  } else if (anim.phase === "drive") {
+    anim.robot = Math.min(anim.path.length - 1, anim.robot + sp / 40);
+    if (anim.robot >= anim.path.length - 1) anim.phase = "done";
+  }
+}
+
+function draw(){
+  const cell = css("--cell"), wall = css("--wall"), seen = css("--seen"), pathC = css("--path"), line = css("--line");
+  ctx.fillStyle = cell; ctx.fillRect(0, 0, cv.width, cv.height);
+  if (anim) {
+    ctx.fillStyle = seen;
+    for (let i = 0; i < anim.seen; i++) { const c = anim.order[i]; ctx.fillRect((c % COLS) * CS + 1, ((c / COLS) | 0) * CS + 1, CS - 2, CS - 2); }
+    ctx.fillStyle = pathC;
+    for (let i = 0; i < Math.floor(anim.pathN); i++) { const c = anim.path[i]; ctx.fillRect((c % COLS) * CS + 5, ((c / COLS) | 0) * CS + 5, CS - 10, CS - 10); }
+  }
+  ctx.strokeStyle = line; ctx.lineWidth = 1; ctx.beginPath();
+  for (let x = 0; x <= COLS; x++) { ctx.moveTo(x * CS + .5, 0); ctx.lineTo(x * CS + .5, cv.height); }
+  for (let y = 0; y <= ROWS; y++) { ctx.moveTo(0, y * CS + .5); ctx.lineTo(cv.width, y * CS + .5); }
+  ctx.stroke();
+  ctx.fillStyle = wall;
+  for (let i = 0; i < walls.length; i++) if (walls[i]) ctx.fillRect((i % COLS) * CS + 1, ((i / COLS) | 0) * CS + 1, CS - 2, CS - 2);
+  const dot = (p, color, r) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(p.x * CS + CS / 2, p.y * CS + CS / 2, r, 0, 7); ctx.fill(); };
+  dot(start, css("--start"), CS * .38); dot(goal, css("--goal"), CS * .38);
+  if (anim && (anim.phase === "drive" || anim.phase === "done") && anim.path.length) {
+    const f = Math.floor(anim.robot), t = anim.robot - f;
+    const a = anim.path[f], b = anim.path[Math.min(f + 1, anim.path.length - 1)];
+    const px = ((a % COLS) + ((b % COLS) - (a % COLS)) * t) * CS + CS / 2;
+    const py = (((a / COLS) | 0) + (((b / COLS) | 0) - ((a / COLS) | 0)) * t) * CS + CS / 2;
+    ctx.save(); ctx.shadowColor = pathC; ctx.shadowBlur = 16;
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(px, py, CS * .3, 0, 7); ctx.fill(); ctx.restore();
+    ctx.fillStyle = "#0d9488"; ctx.fillRect(px - 5, py - 3, 3, 3); ctx.fillRect(px + 2, py - 3, 3, 3);
+  }
+}
+
+function loop(){ step(); draw(); requestAnimationFrame(loop); }
+
+// pointer editing
+let drag = null; // "start" | "goal" | "paint" | "erase"
+const cellAt = e => {
+  const r = cv.getBoundingClientRect();
+  return {x: Math.min(COLS - 1, Math.max(0, Math.floor((e.clientX - r.left) / r.width * COLS))),
+          y: Math.min(ROWS - 1, Math.max(0, Math.floor((e.clientY - r.top) / r.height * ROWS)))};
+};
+cv.addEventListener("pointerdown", e => {
+  cv.setPointerCapture(e.pointerId);
+  const c = cellAt(e);
+  if (c.x === start.x && c.y === start.y) drag = "start";
+  else if (c.x === goal.x && c.y === goal.y) drag = "goal";
+  else { drag = walls[idx(c.x, c.y)] ? "erase" : "paint"; walls[idx(c.x, c.y)] = drag === "paint" ? 1 : 0; }
+  reset();
+});
+cv.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const c = cellAt(e), i = idx(c.x, c.y);
+  if (drag === "start" && !walls[i] && !(c.x === goal.x && c.y === goal.y)) start = c;
+  else if (drag === "goal" && !walls[i] && !(c.x === start.x && c.y === start.y)) goal = c;
+  else if (drag === "paint" || drag === "erase") {
+    if ((c.x === start.x && c.y === start.y) || (c.x === goal.x && c.y === goal.y)) return;
+    walls[i] = drag === "paint" ? 1 : 0;
+  }
+  reset();
+});
+const end = () => { drag = null; };
+cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+
+$("run").onclick = run;
+$("clear").onclick = () => { walls.fill(0); reset(); };
+$("maze").onclick = () => {
+  for (let i = 0; i < walls.length; i++) walls[i] = Math.random() < 0.28 ? 1 : 0;
+  walls[idx(start.x, start.y)] = 0; walls[idx(goal.x, goal.y)] = 0; reset();
+};
+$("algo").onchange = reset; $("diag").onchange = reset;
+loop();
+</script>
+</body>
+</html>
